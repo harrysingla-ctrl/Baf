@@ -20,6 +20,35 @@
   <div id="root"></div>
 
   <!-- Your App -->
-  <script type="text/babel" src="./app.jsx"></script>
+  <script type="text/babel">
+
+const { useState, useEffect } = React;
+
+function App() {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    fetch("./allocations_export.json")
+      .then(res => res.json())
+      .then(setData)
+      .catch(() => console.log("error loading data"));
+  }, []);
+
+  if (!data) {
+    return <h2 style={{padding:20}}>Loading...</h2>;
+  }
+
+  return (
+    <div style={{padding:20,fontFamily:"sans-serif"}}>
+      <h1>BAF Tracker ✅</h1>
+      <pre>{JSON.stringify(data, null, 2)}</pre>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+</script>
 </body>
 </html>
