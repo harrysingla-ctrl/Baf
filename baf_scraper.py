@@ -544,7 +544,7 @@ def scrape_fund(fund: dict, period: str, conn: sqlite3.Connection) -> bool:
     fund_id = fund["id"]
     log.info(f"\n{'─'*50}")
     log.info(f"🔍 Scraping: {fund['name']} ({period})")
-
+print("AMFI RAW LENGTH:", len(amfi_data["raw"]) if amfi_data else "None")
     # Strategy 1: Try AMFI portfolio data (most reliable)
     amfi_data = fetch_amfi_portfolio(fund.get("amfi_scheme_code", ""), period)
     if amfi_data:
@@ -565,6 +565,7 @@ def scrape_fund(fund: dict, period: str, conn: sqlite3.Connection) -> bool:
             save_allocation(conn, alloc)
             log_scrape(conn, fund_id, period, "success", "AMFI portfolio")
             return True
+print("PDF PARSED:", parsed)
 
     # Strategy 2: Download and parse PDF factsheet
     pdf_bytes = download_pdf(fund["factsheet_url"])
@@ -588,6 +589,7 @@ def scrape_fund(fund: dict, period: str, conn: sqlite3.Connection) -> bool:
             save_allocation(conn, alloc)
             log_scrape(conn, fund_id, period, "success", "factsheet PDF")
             return True
+print("PARSED DATA:", parsed)
 
     log.warning(f"  ❌ All strategies failed for {fund_id}")
     log_scrape(conn, fund_id, period, "failed", "all strategies exhausted")
