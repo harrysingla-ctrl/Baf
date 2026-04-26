@@ -439,3 +439,5 @@ Use ₹ and Indian market context. Be direct.`;
     </div>
   </div>);
 }
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
