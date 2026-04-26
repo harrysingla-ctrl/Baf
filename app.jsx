@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+const { useState, useEffect, useCallback } = React;
 
 const FUND_META = {
   icici_baf:     { shortName:"ICICI BAF",      color:"#F97316", amc:"ICICI Prudential", category:"BAF" },
