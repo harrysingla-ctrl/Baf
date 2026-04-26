@@ -1,0 +1,33 @@
+name: Scrape BAF Data
+
+on:
+  schedule:
+    - cron: '0 6 12 * *'
+    - cron: '0 6 27 * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install deps
+        run: pip install requests pdfplumber pandas python-dateutil
+
+      - name: Run scraper
+        run: python baf_scraper.py --scrape --export
+
+      - name: Commit JSON
+        run: |
+          git config --global user.name "bot"
+          git config --global user.email "bot@github.com"
+          git add allocations_export.json
+          git commit -m "Auto update data" || echo "No changes"
+          git push
