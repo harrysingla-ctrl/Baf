@@ -23,7 +23,8 @@ jobs:
 
       - name: Install deps
         run: pip install requests pdfplumber pandas python-dateutil
-
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
       - name: Run scraper
         run: python baf_scraper.py --scrape --export
 
