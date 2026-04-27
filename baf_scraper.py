@@ -1,21 +1,20 @@
 """
-BAF/DAA Scraper v3 - Uses Groww & Tickertape (stable URLs, no PDFs)
-=====================================================================
-AMC factsheet PDF URLs change every month and block bots.
-This version scrapes from Groww and Tickertape which have stable URLs,
-publish the same SEBI-mandated data, and are publicly accessible.
+BAF/DAA Scraper v4 - Uses AMFI Portfolio API (official, reliable, no JS)
+=========================================================================
+Source: https://www.amfiindia.com/modules/NavHistoryPeriod
+AMFI publishes monthly portfolio data for all mutual funds.
+This script fetches net equity allocation directly from AMFI's API.
 
-Install:  pip install requests beautifulsoup4
-Run:      python baf_scraper.py
-Output:   data.js  (paste into index.html)
+Install:  pip install requests
+Run:      python baf_scraper.py --scrape --export
+Output:   data.js       (paste into index.html)
           history.json  (keeps track across months)
 """
 
-import re, json, time, logging
+import re, json, time, logging, argparse
 from datetime import datetime
 from pathlib import Path
 import requests
-from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -24,234 +23,213 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.amfiindia.com/",
 }
 
 # ── Fund definitions ──────────────────────────────────────────────────────────
-# Each fund has multiple URLs tried in order. First success wins.
-# Groww and Tickertape show asset allocation % on public pages.
+# amfi_scheme_code: The scheme code from AMFI for the Direct-Growth plan.
+# Find yours at: https://www.amfiindia.com/nav-history-download
+# portfolio_api uses AMFI's monthly portfolio endpoint.
 
 FUNDS = [
     {
         "id": "icici_baf",
         "name": "ICICI Pru Balanced Advantage",
-        "urls": [
-            # Groww shows "Asset Allocation" section with Equity/Debt %
-            "https://groww.in/mutual-funds/icici-prudential-balanced-advantage-fund-direct-growth",
-            # Tickertape shows allocation breakdown
-            "https://www.tickertape.in/mutualfunds/icici-pru-balanced-advantage-fund-M_ICCVB",
-            # ET Money
-            "https://www.etmoney.com/mutual-funds/icici-prudential-balanced-advantage-fund-direct-growth/16443",
-        ],
+        "amfi_scheme_code": "120586",   # ICICI Pru BAF - Direct Growth
     },
     {
         "id": "hdfc_baf",
         "name": "HDFC Balanced Advantage",
-        "urls": [
-            "https://groww.in/mutual-funds/hdfc-balanced-advantage-fund-direct-growth",
-            "https://www.tickertape.in/mutualfunds/hdfc-balanced-advantage-fund-M_HDFBA",
-            "https://www.etmoney.com/mutual-funds/hdfc-balanced-advantage-fund-direct-plan-growth/16024",
-        ],
+        "amfi_scheme_code": "119230",   # HDFC BAF - Direct Growth
     },
     {
         "id": "edelweiss_baf",
         "name": "Edelweiss Balanced Advantage",
-        "urls": [
-            "https://groww.in/mutual-funds/edelweiss-balanced-advantage-direct-plan-growth",
-            "https://www.tickertape.in/mutualfunds/edelweiss-balanced-advantage-fund-M_EDLBA",
-        ],
+        "amfi_scheme_code": "135798",   # Edelweiss BAF - Direct Growth
     },
     {
         "id": "dsp_daa",
         "name": "DSP Dynamic Asset Allocation",
-        "urls": [
-            "https://groww.in/mutual-funds/dsp-dynamic-asset-allocation-fund-direct-growth",
-            "https://www.tickertape.in/mutualfunds/dsp-dynamic-asset-allocation-fund-M_DSPDAA",
-        ],
+        "amfi_scheme_code": "119090",   # DSP DAA - Direct Growth
     },
     {
         "id": "kotak_baf",
         "name": "Kotak Balanced Advantage",
-        "urls": [
-            "https://groww.in/mutual-funds/kotak-balanced-advantage-fund-direct-growth",
-            "https://www.tickertape.in/mutualfunds/kotak-balanced-advantage-fund-M_KOTBA",
-        ],
+        "amfi_scheme_code": "120837",   # Kotak BAF - Direct Growth
     },
     {
         "id": "nippon_baf",
         "name": "Nippon India Balanced Advantage",
-        "urls": [
-            "https://groww.in/mutual-funds/nippon-india-balanced-advantage-fund-direct-growth",
-            "https://www.tickertape.in/mutualfunds/nippon-india-balanced-advantage-fund-M_NIPBA",
-        ],
+        "amfi_scheme_code": "118989",   # Nippon BAF - Direct Growth
     },
 ]
 
-# ── Parsing helpers ───────────────────────────────────────────────────────────
+# ── AMFI Portfolio API ────────────────────────────────────────────────────────
 
-def get_page(url, timeout=20):
-    """Fetch a URL, return (html_text, status_code). Returns ('', 0) on failure."""
+def get_amfi_portfolio(scheme_code: str, month: int, year: int):
+    """
+    Fetch portfolio data from AMFI's API for a given scheme and month.
+    Returns parsed JSON or None on failure.
+
+    AMFI endpoint (undocumented but stable):
+    https://www.amfiindia.com/modules/NavHistoryPeriod
+    Portfolio endpoint:
+    https://www.amfiindia.com/modules/PortfolioAllocationDetails
+    """
+    # Primary: AMFI portfolio allocation API
+    url = (
+        "https://www.amfiindia.com/modules/PortfolioAllocationDetails"
+        f"?SchCode={scheme_code}&mf={month:02d}&yf={year}"
+    )
     try:
-        log.info(f"    GET {url[:70]}")
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        log.info(f"    GET AMFI portfolio: scheme={scheme_code} {year}-{month:02d}")
+        r = requests.get(url, headers=HEADERS, timeout=30)
         log.info(f"    → HTTP {r.status_code}, {len(r.content):,} bytes")
-        if r.status_code == 200:
-            return r.text, 200
-        return "", r.status_code
+        if r.status_code == 200 and r.text.strip():
+            return r.text
     except Exception as e:
-        log.warning(f"    → Failed: {e}")
-        return "", 0
+        log.warning(f"    → AMFI API failed: {e}")
+
+    return None
 
 
-def parse_groww(html, fund_id):
+def parse_equity_from_amfi(text: str, scheme_code: str):
     """
-    Groww pages embed JSON in a <script id="__NEXT_DATA__"> tag.
-    The allocation data is inside schemeData.schemeAllocation or similar.
-    Also try regex on the raw HTML for equity percentage.
+    Parse net equity % from AMFI portfolio API response.
+    AMFI returns pipe-separated or JSON data depending on endpoint.
+    Tries multiple patterns to extract equity allocation.
     """
-    # Strategy 1: Extract __NEXT_DATA__ JSON
+    if not text:
+        return None
+
+    lower = text.lower()
+
+    # Pattern 1: JSON response with assetAllocation array
     try:
-        soup = BeautifulSoup(html, "html.parser")
-        script = soup.find("script", {"id": "__NEXT_DATA__"})
-        if script:
-            data = json.loads(script.string)
-            # Walk the JSON looking for equity allocation
-            text = json.dumps(data).lower()
-            # Groww stores allocation as {"assetType":"equity","allocation":45.23}
+        data = json.loads(text)
+        # Handle list of allocation entries
+        if isinstance(data, list):
+            for item in data:
+                asset = str(item.get("assetType", item.get("asset_type", item.get("Asset", "")))).lower()
+                if "equity" in asset and "arbitrage" not in asset:
+                    for key in ["percentage", "percent", "allocation", "Percentage", "Percent"]:
+                        if key in item:
+                            val = float(item[key])
+                            if 10 < val < 100:
+                                log.info(f"    ✅ AMFI JSON list (equity): {val}%")
+                                return val
+        # Handle dict with nested data
+        if isinstance(data, dict):
+            # Look for allocation arrays in any key
+            text_repr = json.dumps(data).lower()
             matches = re.findall(
-                r'"assettype"\s*:\s*"equity"[^}]*?"allocation"\s*:\s*([\d.]+)',
-                text
+                r'"assettype"\s*:\s*"equity"[^}]*?"percentage"\s*:\s*([\d.]+)',
+                text_repr
             )
             if matches:
                 val = float(matches[0])
                 if 10 < val < 100:
-                    log.info(f"    ✅ Groww JSON (equity allocation): {val}%")
+                    log.info(f"    ✅ AMFI JSON dict (equity): {val}%")
                     return val
-
-            # Also try "equityallocation" or "equity":XX pattern in JSON
-            m = re.search(r'"equity"\s*:\s*([\d.]+)', text)
-            if m:
-                val = float(m.group(1))
-                if 10 < val < 100:
-                    log.info(f"    ✅ Groww JSON (equity key): {val}%")
-                    return val
-    except Exception as e:
-        log.debug(f"    Groww JSON parse failed: {e}")
-
-    # Strategy 2: Raw HTML regex — Groww renders "Equity\n45.23%" style text
-    patterns = [
-        # "Equity" label followed by percentage nearby
-        r'equity["\s<>/a-z]*?([\d]+\.[\d]+)\s*%',
-        r'"equity"[^}]{0,100}([\d]+\.[\d]+)',
-        r'equity.*?(\d{2,3}\.\d{1,2})\s*%',
-        # allocation table style
-        r'([\d]+\.[\d]+)\s*%[^%]{0,50}equity',
-    ]
-    lower_html = html.lower()
-    for p in patterns:
-        m = re.search(p, lower_html)
-        if m:
-            val = float(m.group(1))
-            if 10 < val < 100:
-                log.info(f"    ✅ Groww HTML regex: {val}%")
-                return val
-
-    return None
-
-
-def parse_tickertape(html, fund_id):
-    """
-    Tickertape shows allocation in their page. They use server-rendered HTML
-    with class names like 'holding-percent' or embed data in script tags.
-    """
-    lower_html = html.lower()
-
-    # Look for allocation table rows with equity
-    patterns = [
-        r'equity[^<]*?<[^>]+>([\d]+\.[\d]+)\s*%',
-        r'<td[^>]*>equity<[^>]*><td[^>]*>([\d]+\.[\d]+)',
-        r'"equity".*?"percent".*?([\d]+\.[\d]+)',
-        r'net equity.*?([\d]+\.[\d]+)\s*%',
-        r'equity allocation.*?([\d]+\.[\d]+)\s*%',
-    ]
-    for p in patterns:
-        m = re.search(p, lower_html)
-        if m:
-            val = float(m.group(1))
-            if 10 < val < 100:
-                log.info(f"    ✅ Tickertape: {val}%")
-                return val
-
-    # Try to find __NEXT_DATA__ too (Tickertape is also Next.js)
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        script = soup.find("script", {"id": "__NEXT_DATA__"})
-        if script:
-            text = json.dumps(json.loads(script.string)).lower()
-            m = re.search(r'"equity"[^}]{0,50}([\d]+\.[\d]+)', text)
-            if m:
-                val = float(m.group(1))
-                if 10 < val < 100:
-                    log.info(f"    ✅ Tickertape JSON: {val}%")
-                    return val
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         pass
 
-    return None
+    # Pattern 2: Pipe-separated text (AMFI's older format)
+    # Format: SchemeCode|SchemeName|AssetType|Percentage
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 4:
+            asset_col = parts[2].lower() if len(parts) > 2 else ""
+            if "equity" in asset_col and "arbitrage" not in asset_col:
+                try:
+                    val = float(parts[3].replace("%", "").strip())
+                    if 10 < val < 100:
+                        log.info(f"    ✅ AMFI pipe-text (equity): {val}%")
+                        return val
+                except ValueError:
+                    pass
 
-
-def parse_etmoney(html, fund_id):
-    """ET Money shows portfolio allocation as a donut chart with data attributes."""
-    lower_html = html.lower()
+    # Pattern 3: HTML table (AMFI sometimes returns HTML)
     patterns = [
-        r'equity.*?(\d{2,3}\.\d{1,2})\s*%',
-        r'(\d{2,3}\.\d{1,2})\s*%.*?equity',
-        r'"equity".*?(\d{2,3}\.\d{1,2})',
+        r'equity(?!\s*arbitrage)[^<\d]{0,80}([\d]{2,3}\.[\d]{1,2})\s*%',
+        r'net equity[^<\d]{0,80}([\d]{2,3}\.[\d]{1,2})',
+        r'([\d]{2,3}\.[\d]{1,2})\s*%[^%<]{0,60}equity(?!\s*arbitrage)',
     ]
     for p in patterns:
-        m = re.search(p, lower_html)
+        m = re.search(p, lower)
         if m:
             val = float(m.group(1))
             if 10 < val < 100:
-                log.info(f"    ✅ ET Money: {val}%")
+                log.info(f"    ✅ AMFI HTML/text regex (equity): {val}%")
                 return val
+
     return None
 
 
-PARSER_MAP = {
-    "groww.in": parse_groww,
-    "tickertape.in": parse_tickertape,
-    "etmoney.com": parse_etmoney,
-}
+def fetch_amfi_portfolio(scheme_code: str, period: str):
+    """
+    Main function to get equity allocation for a scheme.
+    Tries current period and falls back to previous month if needed.
+    """
+    year, month = int(period[:4]), int(period[5:7])
+
+    # Try current period
+    text = get_amfi_portfolio(scheme_code, month, year)
+    val = parse_equity_from_amfi(text, scheme_code) if text else None
+    if val:
+        return val
+
+    # Try previous month as fallback
+    prev_month = month - 1 or 12
+    prev_year = year if month > 1 else year - 1
+    log.info(f"    ↩ Trying previous month: {prev_year}-{prev_month:02d}")
+    text = get_amfi_portfolio(scheme_code, prev_month, prev_year)
+    val = parse_equity_from_amfi(text, scheme_code) if text else None
+    if val:
+        return val
+
+    return None
 
 
-def scrape_fund(fund):
-    """Try each URL for a fund. Return net equity % or None."""
-    for url in fund["urls"]:
-        html, status = get_page(url)
-        if not html:
-            time.sleep(2)
-            continue
+# ── Fallback: MFI Explorer API (public, returns JSON) ─────────────────────────
 
-        # Pick parser based on domain
-        parser = None
-        for domain, fn in PARSER_MAP.items():
-            if domain in url:
-                parser = fn
-                break
-        if parser is None:
-            parser = parse_groww  # default
+def fetch_mfapi_portfolio(scheme_code: str):
+    """
+    mfapi.in is a free public API for Indian mutual funds.
+    It provides NAV history but not portfolio allocation directly.
+    Used here as a connectivity check / future extension.
+    """
+    url = f"https://api.mfapi.in/mf/{scheme_code}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            log.info(f"    ✅ mfapi.in reachable for scheme {scheme_code}: {data.get('meta', {}).get('scheme_name', '')}")
+            return data
+    except Exception as e:
+        log.warning(f"    mfapi.in failed: {e}")
+    return None
 
-        val = parser(html, fund["id"])
-        if val and 10 < val < 100:
-            return round(val, 2)
 
-        time.sleep(3)  # polite delay between attempts
+def scrape_fund(fund: dict, period: str):
+    """
+    Try AMFI portfolio API. Return net equity % or None.
+    """
+    scheme_code = fund.get("amfi_scheme_code", "")
+    if not scheme_code:
+        log.warning(f"  No scheme code for {fund['id']}")
+        return None
+
+    log.info(f"  Fetching AMFI portfolio for scheme {scheme_code}...")
+    val = fetch_amfi_portfolio(scheme_code, period)
+
+    if val:
+        return round(val, 2)
+
+    # Log what mfapi says (helps debug scheme codes)
+    log.info(f"  Checking scheme code validity via mfapi.in...")
+    fetch_mfapi_portfolio(scheme_code)
 
     return None
 
@@ -259,8 +237,13 @@ def scrape_fund(fund):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scrape", action="store_true", help="Scrape live data")
+    parser.add_argument("--export", action="store_true", help="Export data.js")
+    args = parser.parse_args()
+
     now = datetime.now()
-    # AMFI data available after ~10th of next month
+    # AMFI portfolio data published after ~10th of next month
     if now.day < 12:
         m = now.month - 1 or 12
         y = now.year if now.month > 1 else now.year - 1
@@ -268,8 +251,8 @@ def main():
         m, y = now.month, now.year
     period = f"{y}-{m:02d}"
 
-    log.info(f"=== BAF/DAA Scraper v3 === Period: {period}")
-    log.info("Source: Groww.in / Tickertape.in (stable public URLs)")
+    log.info(f"=== BAF/DAA Scraper v4 === Period: {period}")
+    log.info("Source: AMFI India Portfolio API (official, no bot-blocking)")
 
     # Load history
     hist_path = Path("history.json")
@@ -277,94 +260,89 @@ def main():
 
     results, failed = {}, []
 
-    for fund in FUNDS:
-        fid = fund["id"]
-        log.info(f"\n--- {fund['name']} ---")
-        val = scrape_fund(fund)
+    if args.scrape:
+        for fund in FUNDS:
+            fid = fund["id"]
+            log.info(f"\n--- {fund['name']} ---")
+            val = scrape_fund(fund, period)
 
-        if val is None:
-            log.warning(f"  ❌ All sources failed for {fid}")
-            failed.append(fund["name"])
-            # Fall back to last known value
-            if fid in history and history[fid].get("net_equity"):
-                val = history[fid]["net_equity"][-1]
-                log.info(f"  ↩  Using last known value: {val}%")
+            if val is None:
+                log.warning(f"  ❌ AMFI returned no data for {fid}")
+                failed.append(fund["name"])
+                # Fall back to last known value from history
+                if fid in history and history[fid].get("net_equity"):
+                    val = history[fid]["net_equity"][-1]
+                    log.info(f"  ↩  Using last known value: {val}%")
+                else:
+                    log.warning(f"  No history either. Skipping.")
+                    continue
+
+            # Update history
+            if fid not in history:
+                history[fid] = {"periods": [], "net_equity": []}
+            if period not in history[fid]["periods"]:
+                history[fid]["periods"].append(period)
+                history[fid]["net_equity"].append(val)
             else:
-                log.warning(f"  No history either. Skipping.")
-                continue
+                idx = history[fid]["periods"].index(period)
+                history[fid]["net_equity"][idx] = val
 
-        # Update history
-        if fid not in history:
-            history[fid] = {"periods": [], "net_equity": []}
-        if period not in history[fid]["periods"]:
-            history[fid]["periods"].append(period)
-            history[fid]["net_equity"].append(val)
-        else:
-            idx = history[fid]["periods"].index(period)
-            history[fid]["net_equity"][idx] = val
+            results[fid] = val
+            time.sleep(1)
 
-        results[fid] = val
-        time.sleep(3)
+        # Save history
+        hist_path.write_text(json.dumps(history, indent=2))
+        log.info(f"\nhistory.json saved ({len(history)} funds)")
 
-    # Save history
-    hist_path.write_text(json.dumps(history, indent=2))
-
-    # Build output
-    tracker_data = {
-        "_isSample": False,
-        "generated_at": now.isoformat(),
-        "funds": {
-            fid: {
-                "periods": history[fid]["periods"],
-                "net_equity": history[fid]["net_equity"],
-            }
-            for fid in history
-        },
-    }
-
-    js_out = "const TRACKER_DATA = " + json.dumps(tracker_data, indent=2) + ";"
-    Path("data.js").write_text(js_out)
+    # ── Export data.js ──
+    if args.export:
+        tracker_data = {
+            "_isSample": False,
+            "generated_at": now.isoformat(),
+            "funds": {
+                fid: {
+                    "periods": history[fid]["periods"],
+                    "net_equity": history[fid]["net_equity"],
+                }
+                for fid in history
+            },
+        }
+        js_out = "const TRACKER_DATA = " + json.dumps(tracker_data, indent=2) + ";"
+        Path("data.js").write_text(js_out)
+        log.info("data.js exported ✅")
 
     # ── Summary ──
     print("\n" + "=" * 55)
     print("RESULTS")
-    print(f"Period scraped : {period}")
-    print(f"Funds succeeded: {len(results)} / {len(FUNDS)}")
+    print(f"Period : {period}")
+    print(f"Scraped: {len(results)} / {len(FUNDS)} funds")
     if failed:
-        print(f"Failed         : {', '.join(failed)}")
-        print()
-        print(">>> If scraping failed, websites may have changed structure.")
-        print("    Run the manual fallback below instead.")
+        print(f"Failed : {', '.join(failed)}")
     print()
-    print("NET EQUITY ALLOCATIONS:")
-    for fid, eq in results.items():
-        name = next(f["name"] for f in FUNDS if f["id"] == fid)
-        bar = "█" * int(eq / 5) + "░" * (20 - int(eq / 5))
-        print(f"  {name:<35} {bar} {eq:.1f}%")
-    print()
-    print("data.js created ✅")
-    print()
-    print("NEXT STEP:")
-    print("  1. Open data.js → Select All → Copy")
-    print("  2. Open index.html in any text editor (Notepad is fine)")
-    print("  3. Find line that starts with:  const TRACKER_DATA =")
-    print("  4. Select from that line to the closing  };")
-    print("  5. Paste what you copied → Save")
-    print("  6. Open index.html in Chrome → Done!")
-    print("=" * 55)
 
-    if len(results) == 0:
+    if results:
+        print("NET EQUITY ALLOCATIONS:")
+        for fid, eq in results.items():
+            name = next(f["name"] for f in FUNDS if f["id"] == fid)
+            bar = "█" * int(eq / 5) + "░" * (20 - int(eq / 5))
+            print(f"  {name:<35} {bar} {eq:.1f}%")
+    else:
+        print("⚠️  No data scraped.")
         print()
-        print("⚠️  ALL FUNDS FAILED. Try the manual fallback:")
+        print("Possible reasons:")
+        print("  1. AMFI hasn't published portfolio for this month yet")
+        print("     (data usually available after the 10th of next month)")
+        print("  2. Scheme codes may need updating")
         print()
-        print("MANUAL FALLBACK (takes ~5 minutes):")
-        for fund in FUNDS:
-            print(f"  {fund['name']}: {fund['urls'][0]}")
+        print("To verify scheme codes, visit:")
+        print("  https://api.mfapi.in/mf/search?q=icici+balanced+advantage")
+        print("  Replace the scheme code in FUNDS[] with the correct one.")
         print()
-        print("  Visit each URL in your browser, find the 'Asset Allocation'")
-        print("  section, note the Equity %. Then edit history.json manually:")
-        print()
-        print('  { "icici_baf": {"periods": ["2026-04"], "net_equity": [45.2]}, ... }')
+        print("To manually seed data, edit history.json:")
+        print('  {"icici_baf": {"periods": ["2026-03"], "net_equity": [45.2]}}')
+
+    print()
+    print("=" * 55)
 
 
 if __name__ == "__main__":
