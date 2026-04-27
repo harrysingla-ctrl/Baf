@@ -1,53 +1,587 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>BAF Tracker</title>
-
-  <!-- React -->
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-
-  <!-- Babel (IMPORTANT for JSX) -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-  <style>
-    body { margin: 0; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BAF/DAA Allocation Tracker</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Sora:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: #0a0f1e; font-family: 'Sora', sans-serif; color: #e2e8f0; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #1a2035; }
+  ::-webkit-scrollbar-thumb { background: #3d4f7c; border-radius: 3px; }
+  code, pre { font-family: 'IBM Plex Mono', monospace; }
+</style>
 </head>
 <body>
-  <div id="root"></div>
+<div id="root"></div>
 
-  <!-- Your App -->
-  <script type="text/babel">
+<script type="text/babel">
+// ─── NO "export default" here — Babel standalone doesn't support ESM exports ───
+const { useState, useEffect, useCallback } = React;
 
-const { useState, useEffect } = React;
+// ── Fund metadata ──────────────────────────────────────────────────────────────
+const FUND_META = {
+  icici_baf:     { shortName:"ICICI BAF",     color:"#f97316", amc:"ICICI Prudential",  category:"BAF" },
+  hdfc_baf:      { shortName:"HDFC BAF",      color:"#ef4444", amc:"HDFC AMC",          category:"BAF" },
+  edelweiss_baf: { shortName:"Edelweiss BAF", color:"#a78bfa", amc:"Edelweiss MF",      category:"BAF" },
+  dsp_daa:       { shortName:"DSP DAA",       color:"#22d3ee", amc:"DSP MF",            category:"DAA" },
+  kotak_baf:     { shortName:"Kotak BAF",     color:"#34d399", amc:"Kotak MF",          category:"BAF" },
+  nippon_baf:    { shortName:"Nippon BAF",    color:"#fbbf24", amc:"Nippon India MF",   category:"BAF" },
+  bajaj_baf:     { shortName:"Bajaj BAF",     color:"#f472b6", amc:"Bajaj Finserv MF",  category:"BAF" },
+  axis_daa:      { shortName:"Axis DAA",      color:"#94a3b8", amc:"Axis MF",           category:"DAA" },
+};
 
-function App() {
-  const [data, setData] = useState(null);
+// ── Sample data builder ────────────────────────────────────────────────────────
+function buildSampleData() {
+  const periods = Array.from({length:19},(_,i)=>{
+    const d=new Date(2024,9+i,1);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+  });
+  const base = {
+    icici_baf:     [52,51,50,49,47,44,43,42,43,44,46,48,46,45,43,41,42,44,45],
+    hdfc_baf:      [58,57,56,54,52,49,48,47,48,50,52,54,52,50,48,46,47,49,50],
+    edelweiss_baf: [55,54,53,51,49,46,45,44,45,47,49,51,49,47,45,43,44,46,47],
+    dsp_daa:       [60,59,58,56,53,50,49,48,49,51,54,57,55,52,50,48,49,51,52],
+    kotak_baf:     [54,53,52,50,48,45,44,43,44,46,48,50,48,46,44,42,43,45,46],
+    nippon_baf:    [56,55,54,52,50,47,46,45,46,48,50,52,50,48,46,44,45,47,48],
+    bajaj_baf:     [50,49,48,47,45,42,41,40,41,43,45,47,45,43,41,39,40,42,43],
+    axis_daa:      [53,52,51,50,48,45,44,43,44,46,48,50,48,46,44,42,43,45,46],
+  };
+  const funds = {};
+  Object.entries(base).forEach(([id,vals])=>{
+    funds[id]={
+      name:(FUND_META[id]?.shortName||id)+" Fund",
+      periods, net_equity:vals,
+      gross_equity:vals.map(v=>v+8),
+      hedged:vals.map(()=>8),
+      debt:vals.map(v=>100-v-8)
+    };
+  });
+  return { funds, generated_at:new Date().toISOString(), _isSample:true };
+}
 
-  useEffect(() => {
-    fetch("./allocations_export.json")
-      .then(res => res.json())
-      .then(setData)
-      .catch(() => console.log("error loading data"));
-  }, []);
-
-  if (!data) {
-    return <h2 style={{padding:20}}>Loading...</h2>;
+// ── Data loader ────────────────────────────────────────────────────────────────
+async function loadData() {
+  try {
+    const r = await fetch("./allocations_export.json");
+    if (!r.ok) throw new Error("not found");
+    return { ...(await r.json()), _isSample:false };
+  } catch {
+    return buildSampleData();
   }
+}
 
+// ── Signal helper ──────────────────────────────────────────────────────────────
+const sig = eq => eq>=60 ? {label:"Very Bullish", color:"#34d399", bg:"rgba(52,211,153,.15)"}
+  : eq>=52 ? {label:"Bullish",   color:"#6ee7b7", bg:"rgba(110,231,183,.12)"}
+  : eq>=45 ? {label:"Neutral",   color:"#fbbf24", bg:"rgba(251,191,36,.12)"}
+  : eq>=38 ? {label:"Cautious",  color:"#f97316", bg:"rgba(249,115,22,.12)"}
+  :          {label:"Defensive", color:"#ef4444", bg:"rgba(239,68,68,.12)"};
+
+// ── Sparkline ──────────────────────────────────────────────────────────────────
+function Spark({vals,color}) {
+  if(!vals||vals.length<2) return null;
+  const mn=Math.min(...vals), mx=Math.max(...vals), rng=mx-mn||1, W=80, H=28;
+  const pts=vals.map((v,i)=>`${(i/(vals.length-1))*W},${H-((v-mn)/rng)*H}`).join(" ");
+  const up = vals[vals.length-1] >= vals[vals.length-2];
   return (
-    <div style={{padding:20,fontFamily:"sans-serif"}}>
-      <h1>BAF Tracker ✅</h1>
-      <pre>{JSON.stringify(data, null, 2)}</pre>
+    <svg width={W} height={H}>
+      <polyline points={pts} fill="none"
+        stroke={up ? color : "#ef4444"}
+        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+// ── Allocation bar ─────────────────────────────────────────────────────────────
+function Bar({equity, prev}) {
+  const chg = prev !== undefined ? equity - prev : 0;
+  return (
+    <div>
+      <div style={{display:"flex",borderRadius:6,overflow:"hidden",height:8,background:"#1e2a45"}}>
+        <div style={{width:`${equity}%`,background:`linear-gradient(90deg,#6366f1,#8b5cf6)`,transition:"width .6s"}}/>
+        <div style={{width:`${100-equity}%`,background:"#1e2a45"}}/>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#64748b",marginTop:3}}>
+        <span>Equity {equity.toFixed(1)}%</span>
+        {chg!==0&&<span style={{color:chg>0?"#34d399":"#ef4444",fontWeight:700}}>
+          {chg>0?"▲":"▼"}{Math.abs(chg).toFixed(1)}%
+        </span>}
+        <span>Debt {(100-equity).toFixed(1)}%</span>
+      </div>
     </div>
   );
 }
 
+// ── Gauge ──────────────────────────────────────────────────────────────────────
+function Gauge({avg}) {
+  const pct=Math.min(100,Math.max(0,((avg-30)/50)*100));
+  const angle=-130+(pct/100)*260;
+  const rad=d=>(d*Math.PI)/180;
+  const cx=60,cy=60,r=45, s=sig(avg);
+  const bands=[["#ef4444",-130,-78],["#f97316",-78,-26],["#fbbf24",-26,26],["#6ee7b7",26,78],["#34d399",78,130]];
+  return (
+    <div style={{textAlign:"center"}}>
+      <svg viewBox="0 0 120 70" width={170} height={100}>
+        {bands.map(([c,s0,e],i)=>{
+          const x1=cx+r*Math.cos(rad(s0)),y1=cy+r*Math.sin(rad(s0));
+          const x2=cx+r*Math.cos(rad(e)),y2=cy+r*Math.sin(rad(e));
+          return <path key={i} d={`M${cx} ${cy} L${x1} ${y1} A${r} ${r} 0 0 1 ${x2} ${y2}Z`} fill={c} opacity=".3"/>;
+        })}
+        <line x1="60" y1="60" x2={60+38*Math.cos(rad(angle))} y2={60+38*Math.sin(rad(angle))}
+          stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+        <circle cx="60" cy="60" r="4" fill="white"/>
+        <text x="60" y="52" textAnchor="middle" fontSize="11" fontWeight="800" fill="white">{avg.toFixed(1)}%</text>
+      </svg>
+      <div style={{fontSize:12,fontWeight:700,color:s.color,marginTop:-6}}>{s.label}</div>
+      <div style={{fontSize:10,color:"#475569",marginTop:2}}>Avg Net Equity</div>
+    </div>
+  );
+}
+
+// ── Main App ───────────────────────────────────────────────────────────────────
+function App() {
+  const [data, setData]         = useState(null);
+  const [tab, setTab]           = useState("dashboard");
+  const [aiText, setAiText]     = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [pinned, setPinned]     = useState(null);
+
+  useEffect(() => { loadData().then(setData); }, []);
+
+  const funds = data ? Object.entries(data.funds).map(([id,f]) => {
+    const m = FUND_META[id] || {shortName:id, color:"#64748b", amc:"AMC", category:"BAF"};
+    const n = f.net_equity.length;
+    return { id, ...m, name:f.name,
+      curr:f.net_equity[n-1], prev:f.net_equity[n-2],
+      spark:f.net_equity.slice(-8), periods:f.periods,
+      net_equity:f.net_equity, debt:f.debt };
+  }) : [];
+
+  const visible = pinned ? funds.filter(f=>f.id===pinned) : funds;
+  const avg = visible.length ? visible.reduce((s,f)=>s+f.curr,0)/visible.length : 0;
+  const latestPeriod = funds[0]?.periods?.slice(-1)[0] || "—";
+
+  // ── AI call — uses the Anthropic API (key injected by claude.ai proxy) ───────
+  const runAI = useCallback(async () => {
+    if (!data) return;
+    setAiLoading(true); setAiText("");
+    const summary = funds.map(f =>
+      `${f.shortName}: ${f.curr.toFixed(1)}% net equity (${f.curr-f.prev>=0?"+":""}${(f.curr-f.prev).toFixed(1)}% MoM)`
+    ).join("\n");
+    const trend = funds.map(f =>
+      `${f.shortName}: ${f.spark[0].toFixed(1)}% → ${f.spark[f.spark.length-1].toFixed(1)}%`
+    ).join("\n");
+    const prompt =
+`You are an expert Indian mutual fund analyst. Analyse these BAF/DAA net equity allocations:
+
+CURRENT (${latestPeriod}):
+${summary}
+
+8-MONTH TREND:
+${trend}
+
+Consensus avg: ${avg.toFixed(1)}%
+${data._isSample?"Note: This is SAMPLE data for demonstration.":"Note: This is LIVE scraped data."}
+
+Give 4 concise paragraphs:
+1. What collective valuation signal are fund managers sending?
+2. Which fund diverges most from consensus and why that matters?
+3. What the trend reveals about the market cycle?
+4. Practical takeaway for a retail investor with 3-year horizon.
+
+Use ₹ and Indian market context. Be direct.`;
+
+    try {
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({
+          model:"claude-sonnet-4-20250514",
+          max_tokens:1000,
+          messages:[{role:"user",content:prompt}]
+        })
+      });
+      const d = await r.json();
+      if (d.error) {
+        setAiText(`API error: ${d.error.message || JSON.stringify(d.error)}`);
+      } else {
+        setAiText(d.content?.map(b=>b.text||"").join("") || "No response.");
+      }
+    } catch(e) {
+      setAiText("Failed to reach API: " + e.message);
+    }
+    setAiLoading(false);
+  }, [data, funds, avg, latestPeriod]);
+
+  const TABS = [
+    {id:"dashboard", l:"📊 Dashboard"},
+    {id:"trends",    l:"📈 Trends"},
+    {id:"signals",   l:"🧠 AI Signals"},
+    {id:"setup",     l:"⚙️ Setup"},
+  ];
+
+  // ── Styles ──────────────────────────────────────────────────────────────────
+  const card = {
+    background:"#111827",
+    borderRadius:14,
+    border:"1px solid #1e2a45",
+    padding:"14px 16px",
+    boxShadow:"0 2px 12px rgba(0,0,0,.4)",
+  };
+
+  if (!data) return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",
+      height:"100vh",flexDirection:"column",gap:12}}>
+      <div style={{fontSize:36}}>⚖️</div>
+      <div style={{fontSize:14,fontWeight:700,color:"#6366f1",letterSpacing:1}}>LOADING…</div>
+    </div>
+  );
+
+  return (
+    <div style={{fontFamily:"'Sora','Segoe UI',sans-serif",background:"#0a0f1e",minHeight:"100vh",color:"#e2e8f0"}}>
+
+      {/* ── Header ── */}
+      <div style={{background:"linear-gradient(160deg,#0f172a 0%,#1a1040 60%,#0f1a35 100%)",
+        borderBottom:"1px solid #1e2a45",padding:"18px 18px 0"}}>
+        <div style={{maxWidth:940,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+            <span style={{fontSize:22}}>⚖️</span>
+            <h1 style={{margin:0,fontSize:17,fontWeight:800,letterSpacing:"-0.5px",color:"white"}}>
+              BAF/DAA Allocation Tracker
+            </h1>
+            <span style={{
+              background:data._isSample?"rgba(251,191,36,.2)":"rgba(52,211,153,.2)",
+              color:data._isSample?"#fbbf24":"#34d399",
+              border:`1px solid ${data._isSample?"#fbbf24":"#34d399"}`,
+              fontSize:9,fontWeight:800,padding:"2px 8px",borderRadius:20,letterSpacing:.5}}>
+              {data._isSample?"DEMO DATA":"LIVE DATA"}
+            </span>
+          </div>
+          <p style={{margin:"0 0 14px",fontSize:11,color:"#475569"}}>
+            Track net equity allocation shifts in BAF/DAA funds as market valuation signals · {latestPeriod}
+          </p>
+          <div style={{display:"flex",gap:2}}>
+            {TABS.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)} style={{
+                background:tab===t.id?"#6366f1":"transparent",
+                color:tab===t.id?"white":"#475569",
+                border:"none",padding:"7px 14px",borderRadius:"8px 8px 0 0",
+                fontSize:12,fontWeight:600,cursor:"pointer",transition:"all .15s"}}>
+                {t.l}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{maxWidth:940,margin:"0 auto",padding:"16px 14px"}}>
+
+        {/* ── DASHBOARD ── */}
+        {tab==="dashboard" && <div>
+          {data._isSample && (
+            <div style={{background:"rgba(251,191,36,.08)",border:"1px solid rgba(251,191,36,.3)",
+              borderRadius:10,padding:"9px 14px",fontSize:12,color:"#fbbf24",marginBottom:14}}>
+              ⚠️ <strong>Demo mode.</strong> Run{" "}
+              <code style={{background:"rgba(255,255,255,.08)",padding:"1px 5px",borderRadius:4}}>
+                python baf_scraper.py --scrape --export
+              </code>{" "}
+              and serve <code style={{background:"rgba(255,255,255,.08)",padding:"1px 5px",borderRadius:4}}>
+                allocations_export.json
+              </code>{" "}
+              alongside this file to see real data.
+            </div>
+          )}
+
+          <div style={{display:"flex",gap:13,marginBottom:16,flexWrap:"wrap"}}>
+            <div style={{...card,flexShrink:0}}>
+              <Gauge avg={avg}/>
+            </div>
+            <div style={{flex:1,minWidth:190,display:"flex",flexDirection:"column",gap:9}}>
+              <div style={{...card}}>
+                <div style={{fontSize:10,color:"#475569",fontWeight:700,marginBottom:8,letterSpacing:.5}}>
+                  SIGNAL LEGEND
+                </div>
+                {[["Very Bullish","≥60%","#34d399"],["Bullish","52–60%","#6ee7b7"],
+                  ["Neutral","45–52%","#fbbf24"],["Cautious","38–45%","#f97316"],
+                  ["Defensive","<38%","#ef4444"]].map(([l,range,c])=>(
+                  <div key={l} style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
+                    <div style={{width:8,height:8,borderRadius:"50%",background:c,flexShrink:0}}/>
+                    <span style={{fontSize:11,fontWeight:600,color:"#cbd5e1"}}>{l}</span>
+                    <span style={{fontSize:10,color:"#475569",marginLeft:"auto"}}>{range}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.2)",
+                borderRadius:10,padding:"9px 13px"}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#818cf8"}}>💡 Reading signals</div>
+                <div style={{fontSize:11,color:"#6366f1",marginTop:3,lineHeight:1.6}}>
+                  Low equity → market seen as expensive.<br/>
+                  Rising equity → value detected.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{fontSize:10,color:"#475569",fontWeight:700,marginBottom:9,letterSpacing:.5}}>
+            FUND CARDS · {latestPeriod} · Click to focus
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(255px,1fr))",gap:10}}>
+            {funds.map(f=>{
+              const s = sig(f.curr), isSel = !pinned || pinned===f.id;
+              return (
+                <div key={f.id} onClick={()=>setPinned(p=>p===f.id?null:f.id)} style={{
+                  ...card,cursor:"pointer",
+                  boxShadow:pinned===f.id?`0 0 0 2px ${f.color},0 4px 20px rgba(0,0,0,.5)`:"0 2px 12px rgba(0,0,0,.4)",
+                  opacity:isSel?1:0.4,transition:"all .2s"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                        <div style={{width:9,height:9,borderRadius:"50%",background:f.color,flexShrink:0}}/>
+                        <span style={{fontSize:13,fontWeight:700,color:"white"}}>{f.shortName}</span>
+                        <span style={{fontSize:9,fontWeight:700,background:s.bg,color:s.color,
+                          border:`1px solid ${s.color}40`,padding:"1px 7px",borderRadius:10}}>
+                          {s.label}
+                        </span>
+                      </div>
+                      <div style={{fontSize:10,color:"#475569",marginTop:3}}>{f.amc} · {f.category}</div>
+                    </div>
+                    <Spark vals={f.spark} color={f.color}/>
+                  </div>
+                  <Bar equity={f.curr} prev={f.prev}/>
+                </div>
+              );
+            })}
+          </div>
+        </div>}
+
+        {/* ── TRENDS ── */}
+        {tab==="trends" && <div>
+          <div style={{...card,marginBottom:13}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#475569",marginBottom:13,letterSpacing:.5}}>
+              📈 NET EQUITY — LAST 8 PERIODS
+            </div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead>
+                  <tr>
+                    <th style={{textAlign:"left",padding:"4px 8px",color:"#475569",
+                      position:"sticky",left:0,background:"#111827",whiteSpace:"nowrap"}}>Fund</th>
+                    {(funds[0]?.periods?.slice(-8)||[]).map(p=>(
+                      <th key={p} style={{padding:"4px 7px",color:"#475569",textAlign:"center",whiteSpace:"nowrap"}}>
+                        {p.slice(2)}
+                      </th>
+                    ))}
+                    <th style={{padding:"4px 7px",color:"#475569",textAlign:"center"}}>Trend</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {funds.map(f=>{
+                    const rec = f.net_equity.slice(-8);
+                    const dir = rec[rec.length-1] - rec[0];
+                    return (
+                      <tr key={f.id} style={{borderTop:"1px solid #1e2a45"}}>
+                        <td style={{padding:"7px 8px",fontWeight:600,whiteSpace:"nowrap",
+                          position:"sticky",left:0,background:"#111827"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <div style={{width:8,height:8,borderRadius:"50%",background:f.color,flexShrink:0}}/>
+                            {f.shortName}
+                          </div>
+                        </td>
+                        {rec.map((v,i)=>{
+                          const chg = i>0 ? v-rec[i-1] : 0, s = sig(v);
+                          return (
+                            <td key={i} style={{padding:"5px 7px",textAlign:"center",
+                              background:s.bg,fontSize:12,fontWeight:700,color:s.color}}>
+                              {v.toFixed(1)}
+                              {i>0&&chg!==0&&<span style={{fontSize:9,display:"block",
+                                color:chg>0?"#34d399":"#ef4444"}}>
+                                {chg>0?"▲":"▼"}{Math.abs(chg).toFixed(1)}
+                              </span>}
+                            </td>
+                          );
+                        })}
+                        <td style={{textAlign:"center",fontWeight:700,fontSize:11,
+                          color:dir>0?"#34d399":dir<0?"#ef4444":"#64748b"}}>
+                          {dir>0?"▲ RISING":dir<0?"▼ FALLING":"→ FLAT"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{...card}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#475569",marginBottom:12,letterSpacing:.5}}>
+              🔥 MoM CHANGE HEATMAP
+            </div>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              {funds.map(f=>{
+                const vals = f.net_equity.slice(-8);
+                const changes = vals.slice(1).map((v,i)=>v-vals[i]);
+                return (
+                  <div key={f.id} style={{flex:"1 1 185px"}}>
+                    <div style={{fontSize:11,fontWeight:700,marginBottom:6,color:"#cbd5e1"}}>
+                      <span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",
+                        background:f.color,marginRight:5}}/>
+                      {f.shortName}
+                    </div>
+                    <div style={{display:"flex",gap:3}}>
+                      {changes.map((c,i)=>(
+                        <div key={i} style={{flex:1,height:30,borderRadius:4,
+                          background:c>1?"rgba(52,211,153,.2)":c>0?"rgba(52,211,153,.08)":
+                            c<-1?"rgba(239,68,68,.2)":c<0?"rgba(239,68,68,.08)":"#1e2a45",
+                          display:"flex",alignItems:"center",justifyContent:"center",
+                          fontSize:10,fontWeight:700,
+                          color:c>0?"#34d399":c<0?"#ef4444":"#64748b"}}>
+                          {c>0?"+":""}{c.toFixed(1)}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{fontSize:10,color:"#475569",marginTop:10}}>
+              Each cell = MoM Δ in net equity %. Green = adding equity. Red = trimming.
+            </div>
+          </div>
+        </div>}
+
+        {/* ── AI SIGNALS ── */}
+        {tab==="signals" && <div>
+          <div style={{...card,marginBottom:13}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:10}}>
+              <div>
+                <div style={{fontSize:14,fontWeight:700,color:"white"}}>🧠 AI Market Signal Interpreter</div>
+                <div style={{fontSize:11,color:"#475569",marginTop:2}}>
+                  Claude reads collective BAF/DAA positioning as valuation signals
+                </div>
+              </div>
+              <button onClick={runAI} disabled={aiLoading} style={{
+                background:aiLoading?"#1e2a45":"linear-gradient(135deg,#6366f1,#8b5cf6)",
+                color:aiLoading?"#475569":"white",
+                border:"none",padding:"10px 18px",borderRadius:10,fontWeight:700,
+                fontSize:12,cursor:aiLoading?"wait":"pointer",transition:"all .2s"}}>
+                {aiLoading?"Analysing…":"▶ Run Analysis"}
+              </button>
+            </div>
+
+            {aiLoading && (
+              <div style={{textAlign:"center",padding:34,color:"#6366f1"}}>
+                <div style={{fontSize:28,marginBottom:8}}>🔍</div>
+                <div style={{fontSize:13,fontWeight:600}}>Reading fund manager signals…</div>
+              </div>
+            )}
+            {aiText && !aiLoading && (
+              <div style={{background:"rgba(99,102,241,.06)",border:"1px solid rgba(99,102,241,.2)",
+                borderRadius:10,padding:16,fontSize:13,lineHeight:1.8,color:"#cbd5e1"}}>
+                {aiText.split("\n\n").map((p,i)=><p key={i} style={{margin:"0 0 10px"}}>{p}</p>)}
+              </div>
+            )}
+            {!aiText && !aiLoading && (
+              <div style={{textAlign:"center",padding:30,color:"#475569"}}>
+                <div style={{fontSize:30,marginBottom:8}}>📡</div>
+                <div style={{fontSize:13}}>Click "Run Analysis" for Claude's market signal interpretation</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(185px,1fr))",gap:9}}>
+            {[
+              {t:"Consensus",i:"🎯",
+                v:sig(avg).label,
+                s:`Avg: ${avg.toFixed(1)}%`,
+                c:sig(avg).color},
+              {t:"Most Bullish",i:"🟢",
+                v:funds.length?funds.reduce((a,b)=>a.curr>b.curr?a:b).shortName:"—",
+                s:`${funds.length?Math.max(...funds.map(f=>f.curr)).toFixed(1):"—"}% equity`,
+                c:"#34d399"},
+              {t:"Most Defensive",i:"🔴",
+                v:funds.length?funds.reduce((a,b)=>a.curr<b.curr?a:b).shortName:"—",
+                s:`${funds.length?Math.min(...funds.map(f=>f.curr)).toFixed(1):"—"}% equity`,
+                c:"#ef4444"},
+              {t:"Largest MoM Shift",i:"📊",
+                v:(()=>{
+                  if(!funds.length) return "—";
+                  const x=funds.map(f=>({n:f.shortName,c:Math.abs(f.curr-f.prev)})).sort((a,b)=>b.c-a.c)[0];
+                  return `${x.n} (${x.c.toFixed(1)}%)`;
+                })(),
+                s:"Biggest monthly move",
+                c:"#fbbf24"},
+            ].map(c=>(
+              <div key={c.t} style={{...card}}>
+                <div style={{fontSize:20,marginBottom:5}}>{c.i}</div>
+                <div style={{fontSize:10,color:"#475569",fontWeight:700,letterSpacing:.5}}>{c.t}</div>
+                <div style={{fontSize:13,fontWeight:800,color:c.c,marginTop:4}}>{c.v}</div>
+                <div style={{fontSize:10,color:"#475569",marginTop:2}}>{c.s}</div>
+              </div>
+            ))}
+          </div>
+        </div>}
+
+        {/* ── SETUP ── */}
+        {tab==="setup" && <div>
+          <div style={{...card,marginBottom:13}}>
+            <div style={{fontSize:14,fontWeight:700,color:"white",marginBottom:4}}>⚙️ 3 Steps to Live Data</div>
+            <div style={{fontSize:12,color:"#475569",marginBottom:18}}>
+              This dashboard is in demo mode — here's how to wire in real scraped data
+            </div>
+
+            {[
+              {n:"1",t:"Run the scraper",i:"🖥️",c:"#6366f1",
+                code:`# Install dependencies\npip install requests pdfplumber pandas python-dateutil\n\n# Scrape latest month + export JSON\npython baf_scraper.py --scrape --export\n\n# Backfill 6 months of history\npython baf_scraper.py --backfill --months 6 --export`},
+              {n:"2",t:"Serve alongside this dashboard",i:"🌐",c:"#8b5cf6",
+                code:`# Simplest: Python local server\npython -m http.server 3000\n# Open http://localhost:3000\n\n# Or deploy to Vercel/Netlify/GitHub Pages\n# index.html + allocations_export.json in same folder`},
+              {n:"3",t:"Automate monthly (GitHub Actions)",i:"🤖",c:"#22d3ee",
+                code:`# .github/workflows/scrape.yml is already in the repo\n# Runs on 12th & 27th every month\n# Auto-commits updated JSON\n# Dashboard always shows latest real data`},
+            ].map(s=>(
+              <div key={s.n} style={{display:"flex",gap:12,marginBottom:20}}>
+                <div style={{width:32,height:32,borderRadius:10,background:s.c,flexShrink:0,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  color:"white",fontWeight:800,fontSize:14}}>{s.n}</div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#cbd5e1"}}>{s.i} {s.t}</div>
+                  <pre style={{background:"#070d1a",color:"#818cf8",borderRadius:8,
+                    padding:"10px 13px",fontSize:11,marginTop:7,overflowX:"auto",
+                    border:"1px solid #1e2a45",lineHeight:1.6,margin:"7px 0 0"}}>
+                    {s.code}
+                  </pre>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{background:"rgba(99,102,241,.06)",border:"1px solid rgba(99,102,241,.2)",
+            borderRadius:14,padding:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#818cf8",marginBottom:8}}>
+              📋 Why scraping AMC factsheets is legal
+            </div>
+            <div style={{fontSize:12,color:"#6366f1",lineHeight:1.7}}>
+              SEBI mandates all mutual funds to publicly disclose full portfolio by the 10th of each month.
+              AMFI aggregates this at <strong>amfiindia.com</strong>. BAF/DAA equity allocation is public
+              information — no login, no API key, no paywall. The scraper reads what funds are{" "}
+              <em>legally required</em> to publish.
+            </div>
+          </div>
+        </div>}
+
+      </div>
+    </div>
+  );
+}
+
+// ── Mount — no "export default", just render directly ─────────────────────────
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<App />);
-
 </script>
 </body>
 </html>
